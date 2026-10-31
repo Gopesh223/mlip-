@@ -1,0 +1,12 @@
+ase==3.29.0
+chgnet==0.4.2
+ijson==3.6.0
+mace-torch==0.3.17
+matplotlib==3.11.2
+mp-api==0.47.0
+numpy==2.5.4
+pandas==2.3.3
+pymatgen==2026.10.24
+scikit-learn==1.9.1
+scipy==1.18.1
+torch==2.6.0+cu124
