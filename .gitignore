@@ -2,3 +2,8 @@ data/*.json
 results/*.jsonl
 *.log
 __pycache__/
+checkpoints/
+*.model
+*.pt
+logs/
+data/*.xyz
