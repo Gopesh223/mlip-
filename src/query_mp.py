@@ -37,5 +37,6 @@ for d in docs:
         "K_mp": K, "G_mp": G,
         "structure": d.structure.as_dict()})
 
+import random; random.Random(0).shuffle(records)
 json.dump(records, open("data/mp_alloys.json", "w"))
 print(len(docs), "fetched ->", len(records), "kept")
