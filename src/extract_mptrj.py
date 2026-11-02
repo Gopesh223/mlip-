@@ -1,6 +1,6 @@
-import json, ijson
+import json, ijson, os, sys
 
-SRC = "/home/gopesh/project/mptrj/MPtrj_2022.9_full.json"
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/mptrj/MPtrj_2022.9_full.json")
 ids = {r["material_id"] for r in json.load(open("data/mp_alloys.json"))}
 print("wanted materials:", len(ids))
 

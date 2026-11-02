@@ -109,32 +109,168 @@ Reading: no gain on familiar elements (about two thirds of structures got slight
 - Error-model analysis used composition features only (no structural descriptors), and leave-one-element-out covered only the 12 most frequent elements.
 - 11 of 3,278 materials are missing from MPtrj. MP is periodically updated, so re-running the query may return slightly different counts.
 
-## Reproducing
+## Reproducing (Linux / WSL2)
 
-Python 3.13, CUDA GPU (developed on an RTX 4060, 8 GB, WSL2). `requirements.txt` is a partial `pip freeze` of the main packages.
+Run every command from the repository root, in a terminal inside Linux (Ubuntu 22.04 or newer, native or WSL2). Developed and tested on WSL2 Ubuntu with Python 3.13, an RTX 4060 (8 GB VRAM) and 11 GB of RAM. Exact package versions are in `requirements.txt` (mace-torch 0.3.17, CHGNet 0.3.0). Other Python versions were not tested.
+
+### What you need
+
+| | |
+|---|---|
+| OS | Ubuntu 22.04+ (native Linux or WSL2) |
+| GPU | NVIDIA, 8 GB VRAM or more (CPU-only was not tried) |
+| Disk | about 30 GB free (the MPtrj file alone is 12.2 GB) |
+| RAM | 11 GB was enough (the MPtrj file is streamed, never loaded whole) |
+| Accounts | a free [Materials Project API key](https://next-gen.materialsproject.org/api) |
+| Time (RTX 4060) | zero-shot benchmark roughly 2.5 h (MACE) and 3.5 h (CHGNet) when run side by side; fine-tuning about 20 min; evaluating the fine-tuned model about 30 min; plus the 12 GB download |
+
+### Step 0. WSL2 only: set up Windows
+
+1. In PowerShell (as administrator): `wsl --install -d Ubuntu`, then reboot and create your Linux user.
+2. Install the latest NVIDIA driver **on Windows**. This is the only GPU driver you need. Do **not** install a Linux GPU driver inside WSL.
+3. Work inside the Linux home directory (`~`), not under `/mnt/c`, which is much slower for file access.
+4. For the long runs below, set Windows power settings to never sleep while plugged in, and keep the terminal window open.
+
+### Step 1. Check that the GPU is visible
 
 ```bash
-pip install -r requirements.txt            # plus mace-torch and a CUDA build of torch
-export MP_API_KEY="..."                    # never commit this
-python src/query_mp.py                     # writes data/mp_alloys.json (shuffled, seed 0)
-PYTHONPATH=src python src/run_benchmark.py mace      # ~1.5 h
-PYTHONPATH=src python src/run_benchmark.py chgnet    # ~3.5 h
+nvidia-smi
+```
+
+Expected: a table listing your GPU and its memory. If this fails, fix the driver before going on.
+
+### Step 2. Install system packages
+
+```bash
+sudo apt update && sudo apt install -y build-essential git wget python3-venv
+```
+
+### Step 3. Get the code
+
+```bash
+git clone https://github.com/Gopesh223/mlip-.git
+cd mlip-
+mkdir -p data results
+```
+
+### Step 4. Create the Python environment
+
+```bash
+python3 -m venv ~/venvs/mlip
+source ~/venvs/mlip/bin/activate
+pip install --upgrade pip
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install mace-torch chgnet ase pymatgen mp-api scikit-learn scipy pandas matplotlib ijson
+```
+
+Check pytorch.org for the current CUDA install command if `cu124` is outdated. Activate the environment again (`source ~/venvs/mlip/bin/activate`) in every new terminal.
+
+### Step 5. Verify PyTorch sees the GPU
+
+```bash
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+```
+
+Expected: `True` followed by your GPU name.
+
+### Step 6. Set your Materials Project API key
+
+```bash
+echo 'export MP_API_KEY="PASTE_YOUR_KEY_HERE"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Never put the key in a file inside the repository.
+
+### Step 7. Build the dataset
+
+```bash
+python src/query_mp.py
+```
+
+Expected output: `5648 fetched -> 3278 kept` for the October 2026 database snapshot. Counts can differ slightly if Materials Project has been updated since. The result is `data/mp_alloys.json` (shuffled with a fixed seed).
+
+### Step 8. Smoke test on 20 structures
+
+```bash
+python src/run_benchmark.py mace 20
+```
+
+Expected: 20 lines of `formula K G` (GPa), written to `results/mace_zeroshot.jsonl`, in about a minute. The first run downloads the MACE-MP-0 weights. With an identical dataset, the first line is `CaLaMg2` with K about 30 GPa and G about 13 GPa. Do the same with `chgnet` in place of `mace`.
+
+### Step 9. Run the full zero-shot benchmark (3,278 structures per model)
+
+```bash
+nohup python src/run_benchmark.py mace > mace.log 2>&1 &
+nohup python src/run_benchmark.py chgnet > chgnet.log 2>&1 &
+```
+
+Check progress at any time:
+
+```bash
+wc -l results/mace_zeroshot.jsonl results/chgnet_zeroshot.jsonl
+```
+
+The runners append one line per structure and skip finished ones, so if a job dies, start the same command again and it resumes. The runs are complete at 3,278 lines each.
+
+### Step 10. Analysis
+
+```bash
 python src/analyze.py mace chgnet
-python src/error_model.py mace; python src/error_model.py chgnet
-python src/ablate.py mace; python src/ablate.py chgnet
+python src/error_model.py mace
+python src/error_model.py chgnet
+python src/ablate.py mace
+python src/ablate.py chgnet
 python src/stiffness_bins.py > results/stiffness_bins.txt
-# fine-tuning (needs MPtrj_2022.9_full.json from Figshare, article 23713842, ~12 GB)
-python src/extract_mptrj.py
+```
+
+Reproduction check: `analyze.py` should print `median K ratio 0.984`, `median G ratio 0.578` and `140 (4.3%)` unstable for MACE, and `0.924`, `0.317` and `494 (15.1%)` for CHGNet (small differences are possible if the dataset differs). Run `error_model.py` before `ablate.py`, because the ablation reads the feature files it writes.
+
+### Step 11 (optional). Fine-tuning MACE-MP-0
+
+**11a. Download MPtrj** (12.2 GB; the timeout flags make wget drop and retry a stalled connection, and `-c` resumes after an interruption). Never run two downloads into the same file.
+
+```bash
+mkdir -p ~/mptrj && cd ~/mptrj
+nohup wget -c -U "Mozilla/5.0" --timeout=30 --read-timeout=30 --tries=0 --retry-connrefused --waitretry=10 -O MPtrj_2022.9_full.json "https://ndownloader.figshare.com/files/41619375" > wget.log 2>&1 &
+```
+
+When `pgrep -af wget` prints nothing, verify the file:
+
+```bash
+stat -c %s MPtrj_2022.9_full.json      # expect 12188168685
+echo "50ead5f27f9a4f6beb7564c4188f1e9f  MPtrj_2022.9_full.json" | md5sum -c   # expect: OK
+cd - > /dev/null
+```
+
+**11b. Build the training data**
+
+```bash
+python src/extract_mptrj.py            # pass a path to use a different file location
 python src/make_split.py
 python src/verify_conventions.py
 python src/make_train_xyz.py
+```
+
+Expected: `done: 3267/3278 materials found, 21224 frames`; split sizes `{'train': 2383, 'val': 316, 'test_chemsys': 312, 'test_hard': 267}`; a stress slope near -1 (-0.91 here), which confirms the stress sign flip; and `13338` train and `1810` validation frames. These counts depend on the Materials Project snapshot.
+
+**11c. Train** (about 20 minutes on an RTX 4060)
+
+```bash
 mace_run_train --name="fine2" --foundation_model="medium" --foundation_model_elements=True \
   --multiheads_finetuning=False --train_file="data/train.xyz" --valid_file="data/valid.xyz" \
   --E0s="foundation" --loss="stress" --energy_weight=10 --forces_weight=10 --stress_weight=1000 \
   --lr=0.0001 --scaling="rms_forces_scaling" --batch_size=16 --valid_batch_size=16 \
   --max_num_epochs=8 --patience=4 --ema --ema_decay=0.99 --amsgrad --default_dtype=float32 \
   --device=cuda --error_table="PerAtomMAEstressvirials" --seed=3
-PYTHONPATH=src python src/eval_ft.py checkpoints/fine2_run-3.model mace_ft2
+```
+
+The log should show `WeightedEnergyForcesStressLoss(... stress_weight=1000.000)` and a numeric `MAE_stress`. The saved model is `checkpoints/fine2_run-3.model` (the best validation epoch, not necessarily the last).
+
+**11d. Evaluate and compare**
+
+```bash
+python src/eval_ft.py checkpoints/fine2_run-3.model mace_ft2
 python src/compare.py mace_ft2
 python src/paired_test.py mace_ft2
 python src/make_figures.py
